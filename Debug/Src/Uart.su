@@ -1,0 +1,9 @@
+D:/parvasense Mit app F411RE/CMSIS/Core/Include/core_cm4.h:1684:22:__NVIC_EnableIRQ	16	static,ignoring_inline_asm
+D:/parvasense Mit app F411RE/CMSIS/Core/Include/core_cm4.h:1814:22:__NVIC_SetPriority	16	static
+../Src/Uart.c:13:23:Lora_RxAvailable	4	static
+../Src/Uart.c:18:6:USART1_IRQHandler	16	static
+../Src/Uart.c:40:6:Uart2_Init	4	static
+../Src/Uart.c:58:6:Uart2_Debug	16	static
+../Src/Uart.c:68:6:Uart1_Init	8	static
+../Src/Uart.c:91:6:Lora_Send	16	static
+../Src/Uart.c:100:6:Lora_ReadChar	24	static

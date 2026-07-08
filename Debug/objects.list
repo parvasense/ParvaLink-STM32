@@ -1,0 +1,7 @@
+"./Src/Lora.o"
+"./Src/Uart.o"
+"./Src/delay.o"
+"./Src/main.o"
+"./Src/syscalls.o"
+"./Src/sysmem.o"
+"./Startup/startup_stm32f401ceux.o"

@@ -1,0 +1,13 @@
+../Src/Lora.c:61:6:Load_Data	4	static
+../Src/Lora.c:82:9:Lora_ReadLine	40	static
+../Src/Lora.c:103:6:Lora_FlushRx	24	static
+../Src/Lora.c:113:9:ResponseOK	24	static
+../Src/Lora.c:142:9:Send_Command	24	static
+../Src/Lora.c:167:9:Build_JSON	152	static
+../Src/Lora.c:192:9:Send_JSON	24	static
+../Src/Lora.c:209:6:Relay_Init	4	static
+../Src/Lora.c:228:6:Relay_Pulse	16	static
+../Src/Lora.c:240:16:Parse_Command	48	static
+../Src/Lora.c:270:16:Send_Relay_Ack	128	static
+../Src/Lora.c:319:6:Lora_CheckRelayCommands	48	static
+../Src/Lora.c:388:6:Lora_Init	8	static
