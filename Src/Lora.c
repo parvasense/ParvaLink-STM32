@@ -14,11 +14,11 @@ char json[200];  // holds the built telemetry JSON string (filled by Build_JSON,
 char cmd[220];   // holds the full AT+SEND=... command, JSON wrapped inside it (filled by Send_JSON, sent by Send_Command)
 
 // ---- Timing/retry constants, used inside ResponseOK() and Send_Command() ----
-#define RESP_TIMEOUT_MS 3000     // total time ResponseOK() will wait for a matching reply before giving up
-#define LINE_TIMEOUT_MS 500      // max time Lora_ReadLine() waits for ONE line within that total window
+#define RESP_TIMEOUT_MS 1000     // total time ResponseOK() will wait for a matching reply before giving up
+#define LINE_TIMEOUT_MS 300      // max time Lora_ReadLine() waits for ONE line within that total window
 
-#define CMD_MAX_RETRIES    3     // how many times Send_Command() retries a failed AT command
-#define CMD_RETRY_DELAY_MS 500   // pause between retries inside Send_Command()
+#define CMD_MAX_RETRIES    1     // how many times Send_Command() retries a failed AT command
+#define CMD_RETRY_DELAY_MS 200   // pause between retries inside Send_Command()
 
 #define ACK_TIMEOUT_MS 3000      // total wait time used by Send_With_ACK() — currently unused/dead code
 
@@ -28,6 +28,13 @@ char cmd[220];   // holds the full AT+SEND=... command, JSON wrapped inside it (
 #define START_RELAY   5
 #define STOP_RELAY   6
 #define RELAY_PULSE_MS 1000
+
+// ---- Command ID dedup — core of the new protocol ----
+// Initialized to 0xFFFF — a value the home node never generates
+// (next_cmd_id starts at 1, wraps at 65535), so the very first
+// real command is never mistaken for a duplicate on cold boot.
+#define INVALID_CMD_ID 0xFFFF
+static uint16_t last_cmd_id = INVALID_CMD_ID;
 
 typedef struct
 {
@@ -225,15 +232,89 @@ void Relay_Pulse(uint8_t pin)
 	GPIOA->BSRR = (1 << pin);		// set bit -> pin HIGH -> relay OFF
 }
 
+// NEW: parses "CMD,<id>,<action>" out of a +RCV= line.
+// Returns 1 on success, fills *id and relay_cmd buffer.
+// Uses sscanf with bounded width (%15s) to prevent overflow
+// from a malformed or noise-corrupted line.
 
-// Sends current Latest_data as JSON to Home Node — doubles as the
-// relay confirmation, since Home Node's send_relay_with_confirm()
-// just checks the next packet's "m" field, no special ACK tag needed.
-static uint8_t Lora_SendAck(void)
+static uint8_t Parse_Command(const char *line, uint16_t *id, char *relay_cmd, size_t relay_cmd_size)
 {
-    return Send_JSON();   // Send_Command's "TX: " line already shows the JSON
+	const char *cmd_start = strstr(line, "CMD,");
+
+	if(!cmd_start)
+	{
+		return 0;
+	}
+
+	unsigned int parsed_id;
+	char parsed_relay[16];
+
+	if(sscanf(cmd_start, "CMD,%u,%15[^,]", &parsed_id, parsed_relay) != 2)
+	{
+		return 0;
+	}
+
+	*id = (uint16_t)parsed_id;
+	strncpy(relay_cmd, parsed_relay, relay_cmd_size - 1);
+
+	relay_cmd[relay_cmd_size - 1] = '\0';
+
+	return 1;
 }
 
+// NEW: sends compact ACK,<id>,<state>,<status> — NOT a JSON telemetry send.
+// Single short attempt only — if this specific ACK is lost, the home node
+// will auto-resend the command, we'll re-detect the duplicate, and re-send
+// this ACK again at that point. No need to retry-loop here.
+
+static uint8_t Send_Relay_Ack(uint16_t id, uint8_t state, const char *status)
+{
+	char ack_payload[32];
+	snprintf(ack_payload, sizeof(ack_payload), "ACK,%u,%d,%s", id, state, status);
+
+	char ack_cmd[64];
+	int len = snprintf(ack_cmd, sizeof(ack_cmd), "AT+SEND=%d,%d,%s\r\n", LORA_DEST_ADDR, (int)strlen(ack_payload), ack_payload);
+
+	if(len < 0 || (size_t)len >= sizeof(ack_cmd))
+	{
+		return 0;
+	}
+
+	Uart2_Debug("TX ACK: ");
+	Uart2_Debug(ack_cmd);
+
+	Lora_Send(ack_cmd);
+
+	 // Single short wait for module's local +OK — not a full ResponseOK() loop
+
+	uint32_t start = ms_ticks;
+
+	while((ms_ticks - start) < 1000)
+	{
+		memset(resp, 0, sizeof(resp));
+		if(Lora_ReadLine(resp, sizeof(resp), 300))
+		{
+			if(strstr(resp, "OK"))
+			{
+				return 1;
+			}
+
+			if(strstr(resp, "ERR"))
+			{
+				return 0;
+			}
+		}
+	}
+
+	return 0;
+}
+
+
+// REWRITTEN: now ID-based dedup instead of state-based dedup.
+// Parses CMD,<id>,<action> — if id matches last_cmd_id, it's a
+// duplicate: skip the relay pulse, just resend the same ACK so the
+// home node can confirm and stop resending. If it's a new id, execute
+// normally, record the id, then send ACK.
 
 void Lora_CheckRelayCommands(uint32_t window_ms)
 {
@@ -252,38 +333,53 @@ void Lora_CheckRelayCommands(uint32_t window_ms)
             DBG(resp);
             DBG("\r\n");
 
-            uint8_t is_rcv = (strstr(resp, "+RCV=") != NULL);  // computed once
+            if (strstr(resp, "+RCV=") == NULL)
+            {
+            	continue;
+            }
 
-            if (is_rcv && strstr(resp, "RELAY1"))
+            uint16_t id;
+            char relay_cmd[16];
+
+            if(!Parse_Command(resp, &id, relay_cmd, sizeof(relay_cmd)))
             {
-                if (Latest_data.m == 1)
-                {
-                    DBG("RELAY1: already ON, resending confirm\r\n");
-                    Lora_SendAck();
-                }
-                else
-                {
-                    DBG("RELAY1 -> Motor ON (pulse)\r\n");
-                    Relay_Pulse(START_RELAY);
-                    Latest_data.m = 1;
-                    Lora_SendAck();
-                }
+            	DBG("Parse failed - not a CMD line\r\n");
+            	continue;
             }
-            else if (is_rcv && strstr(resp, "RELAY2"))
+
+            if(id == last_cmd_id)
             {
-                if (Latest_data.m == 0)
-                {
-                    DBG("RELAY2: already OFF, resending confirm\r\n");
-                    Lora_SendAck();
-                }
-                else
-                {
-                    DBG("RELAY2 -> Motor OFF (pulse)\r\n");
-                    Relay_Pulse(STOP_RELAY);
-                    Latest_data.m = 0;
-                    Lora_SendAck();
-                }
+            	DBG("DUPLICATE cmd id — resending ACK, no relay pulse\r\n");
+            	Send_Relay_Ack(id, Latest_data.m, "DUP");
+            	continue;
             }
+
+            // ---- New command — execute ----
+
+            if(strcmp(relay_cmd, "RELAY1") == 0)
+            {
+            	DBG("RELAY1 -> Motor ON\r\n");
+            	 Relay_Pulse(START_RELAY);
+            	 Latest_data.m = 1;
+            }
+            else if(strcmp(relay_cmd, "RELAY2") == 0)
+            {
+            	 DBG("RELAY2 -> Motor OFF\r\n");
+            	 Relay_Pulse(STOP_RELAY);
+            	 Latest_data.m = 0;
+            }
+            else
+            {
+            	DBG("Unknown relay command — ignoring\r\n");
+            	continue;
+            }
+
+            // Record AFTER successful execution so a crash mid-pulse
+            // doesn't mark it as done when it wasn't
+
+            last_cmd_id = id;
+            Send_Relay_Ack(id, Latest_data.m, "OK");
+
         }
     }
 }
